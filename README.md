@@ -1,5 +1,7 @@
 # Bitcoin_Seed_Generator
 
+https://github.com/Hashrate21/Bitcoin_Seed_Generator/releases/latest
+
 Written in Python on Windows
 
 A tool to create your own seed phrase. Enter your own entropy or let the code roll randomly for you.
