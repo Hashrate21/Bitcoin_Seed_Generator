@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+import hashlib
+import random
+import sys
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+from pathlib import Path
+
+def resource_path(relative_path: str) -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / relative_path
+    return Path(relative_path)
+
+WORDLIST_PATH = resource_path("english.txt")
+
+def load_wordlist():
+    if not WORDLIST_PATH.exists():
+        raise FileNotFoundError("Missing english.txt")
+    with open(WORDLIST_PATH, encoding="utf-8") as f:
+        words = [line.strip() for line in f if line.strip()]
+    if len(words) != 2048:
+        raise ValueError("Expected 2048 words")
+    return words
+
+try:
+    WORDLIST = load_wordlist()
+    WORD_TO_INDEX = {w: i for i, w in enumerate(WORDLIST)}
+    LOAD_ERROR = None
+except Exception as e:
+    WORDLIST = None
+    WORD_TO_INDEX = None
+    LOAD_ERROR = str(e)
+
+def parse_entries(raw_text):
+    tokens = raw_text.replace(",", " ").replace("\n", " ").replace("\t", " ").split()
+    if not tokens:
+        raise ValueError("No entries entered")
+    indices = []
+    for token in tokens:
+        token = token.strip().lower()
+        if not token:
+            continue
+
+        # 1. 11-bit binary string MUST be checked FIRST
+        #    because "11001011100".isdigit() is True and would otherwise
+        #    be treated as a huge number outside 1-2048
+        if len(token) == 11 and all(c in "01" for c in token):
+            idx = int(token, 2)          # 0 … 2047
+            indices.append(idx)
+
+        # 2. Number (1-2048)
+        elif token.isdigit():
+            num = int(token)
+            if not (1 <= num <= 2048):
+                raise ValueError("Number outside 1-2048")
+            indices.append(num - 1)
+
+        # 3. BIP-39 word
+        else:
+            if token not in WORD_TO_INDEX:
+                raise ValueError("Unknown word or invalid token: " + token)
+            indices.append(WORD_TO_INDEX[token])
+
+    return indices
+
+def find_valid_last_indices(first_indices, total_words):
+    if total_words == 12:
+        given = 11
+        free_bits = 7
+        cs_bits = 4
+        ent_bytes = 16
+    else:
+        given = 23
+        free_bits = 3
+        cs_bits = 8
+        ent_bytes = 32
+    if len(first_indices) != given:
+        raise ValueError("Wrong number of entries")
+    prefix = "".join(f"{idx:011b}" for idx in first_indices)
+    candidates = []
+    for i in range(1 << free_bits):
+        entropy_bits = prefix + f"{i:0{free_bits}b}"
+        entropy = int(entropy_bits, 2).to_bytes(ent_bytes, "big")
+        digest = hashlib.sha256(entropy).digest()
+        hash_bits = "".join(f"{b:08b}" for b in digest)
+        checksum = hash_bits[:cs_bits]
+        last_bits = f"{i:0{free_bits}b}" + checksum
+        candidates.append(int(last_bits, 2))
+    return sorted(set(candidates))
+
+def is_valid_full(indices, total_words):
+    if len(indices) != total_words:
+        return False
+    all_bits = "".join(f"{idx:011b}" for idx in indices)
+    if total_words == 12:
+        ent_bits = 128
+        cs_bits = 4
+        ent_bytes = 16
+    else:
+        ent_bits = 256
+        cs_bits = 8
+        ent_bytes = 32
+    entropy_bits = all_bits[:ent_bits]
+    given_cs = all_bits[ent_bits:]
+    entropy = int(entropy_bits, 2).to_bytes(ent_bytes, "big")
+    digest = hashlib.sha256(entropy).digest()
+    hash_bits = "".join(f"{b:08b}" for b in digest)
+    return given_cs == hash_bits[:cs_bits]
+
+def ask_theme():
+    root = tk.Tk()
+    root.withdraw()
+
+    dialog = tk.Toplevel(root)
+    dialog.title("Choose Theme")
+    dialog.geometry("640x170")
+    dialog.resizable(False, False)
+    dialog.configure(bg="#1e1e1e")
+
+    dialog.update_idletasks()
+    x = (dialog.winfo_screenwidth() // 2) - 320
+    y = (dialog.winfo_screenheight() // 2) - 85
+    dialog.geometry(f"+{x}+{y}")
+
+    result = {"theme": "dark"}
+
+    tk.Label(
+        dialog,
+        text="Choose a theme",
+        font=("Consolas", 13, "bold"),
+        bg="#1e1e1e",
+        fg="#d4d4d4"
+    ).pack(pady=14)
+
+    btn_frame = tk.Frame(dialog, bg="#1e1e1e")
+    btn_frame.pack()
+
+    def choose(theme_name):
+        result["theme"] = theme_name
+        dialog.destroy()
+        root.destroy()
+
+    themes = [
+        ("Light",          "light",         "#e0e0e0", "#000000"),
+        ("Dark",           "dark",          "#333333", "#e0e0e0"),
+        ("VS Code Dark",   "vscode_dark",   "#252526", "#569cd6"),
+        ("VS Code Python", "vscode_python", "#2d2d2d", "#4ec9b0"),
+    ]
+
+    for i, (label, key, bg, fg) in enumerate(themes):
+        tk.Button(
+            btn_frame,
+            text=label,
+            width=15,
+            command=lambda k=key: choose(k),
+            bg=bg,
+            fg=fg,
+            font=("Consolas", 10, "bold"),
+            relief="flat",
+            padx=6,
+            pady=5
+        ).grid(row=0, column=i, padx=7, pady=6)
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose("dark"))
+    dialog.grab_set()
+    dialog.mainloop()
+
+    return result["theme"]
+
+class App(tk.Tk):
+    def __init__(self, theme="dark"):
+        super().__init__()
+        self.title("Seed Phrase Generator")
+        self.geometry("780x680")
+        self.minsize(660, 560)
+
+        # ========== THEME COLORS ==========
+        if theme == "light":
+            bg_color     = "#f0f0f0"
+            fg_color     = "#000000"
+            text_bg      = "#ffffff"
+            button_bg    = "#e1e1e1"
+            button_fg    = "#000000"
+            select_bg    = "#cce8ff"
+            active_btn   = "#d0d0d0"
+            border_col   = "#666666"
+            accent1      = "#000000"
+            accent2      = "#000000"
+
+        elif theme == "vscode_dark":
+            bg_color     = "#1e1e1e"
+            fg_color     = "#d4d4d4"
+            text_bg      = "#2e2e2e"
+            button_bg    = "#2a2a2a"
+            button_fg    = "#569cd6"
+            select_bg    = "#2d2d2d"
+            active_btn   = "#3a3d41"
+            border_col   = "#2a2a2a"
+            accent1      = "#9cdcfe"
+            accent2      = "#c35bde"
+
+        elif theme == "vscode_python":
+            bg_color     = "#1e1e1e"
+            fg_color     = "#d4d4d4"
+            text_bg      = "#292c34"
+            button_bg    = "#2d2d2d"
+            button_fg    = "#4ec9b0"
+            select_bg    = "#264f78"
+            active_btn   = "#3a3d41"
+            border_col   = "#569cd6"
+            accent1      = "#d6be8b"
+            accent2      = "#ce9178"
+
+        else:  # dark
+            bg_color     = "#1e1e1e"
+            fg_color     = "#e0e0e0"
+            text_bg      = "#2d2d2d"
+            button_bg    = "#333333"
+            button_fg    = "#e0e0e0"
+            select_bg    = "#555555"
+            active_btn   = "#555555"
+            border_col   = "#888888"
+            accent1      = "#e0e0e0"
+            accent2      = "#e0e0e0"
+
+        self.configure(bg=bg_color)
+
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        default_font = ("Consolas", 10)
+        style.configure(".", font=default_font, background=bg_color, foreground=fg_color, fieldbackground=text_bg)
+
+        style.configure("TFrame", background=bg_color)
+        style.configure("TLabel", background=bg_color, foreground=accent1, font=("Consolas", 10, "bold"))
+
+        style.configure("TButton",
+                        background=button_bg,
+                        foreground=button_fg,
+                        borderwidth=1,
+                        bordercolor=border_col,
+                        lightcolor=border_col,
+                        darkcolor=border_col,
+                        font=("Consolas", 10, "bold"))
+        style.map("TButton",
+                  background=[("active", active_btn)],
+                  foreground=[("active", button_fg)],
+                  bordercolor=[("active", border_col)])
+
+        style.configure("TRadiobutton",
+                        background=bg_color,
+                        foreground=fg_color,
+                        font=("Consolas", 10))
+        style.map("TRadiobutton",
+                  background=[("active", bg_color)],
+                  foreground=[("active", button_fg)])
+
+        style.configure("TLabelframe",
+                        background=bg_color,
+                        foreground=accent2)
+        style.configure("TLabelframe.Label",
+                        background=bg_color,
+                        foreground=accent2,
+                        font=("Consolas", 10, "bold"))
+        # ==================================
+
+        if LOAD_ERROR:
+            messagebox.showerror("Error", LOAD_ERROR)
+            self.destroy()
+            return
+
+        mode_frame = ttk.LabelFrame(self, text="Mnemonic length", padding=8)
+        mode_frame.pack(fill="x", padx=10, pady=6)
+        self.mode = tk.IntVar(value=12)
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="12 words (enter 11 entries)",
+            variable=self.mode,
+            value=12,
+            command=self.update_count
+        ).pack(anchor="w")
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="24 words (enter 23 entries)",
+            variable=self.mode,
+            value=24,
+            command=self.update_count
+        ).pack(anchor="w")
+
+        ttk.Label(
+            self,
+            text="Enter entropy tokens (space or comma separated):"
+        ).pack(anchor="w", padx=10, pady=(6, 0))
+
+        # Notes section – valid manual entry types
+        notes_frame = ttk.LabelFrame(self, text="Accepted input formats", padding=6)
+        notes_frame.pack(fill="x", padx=10, pady=4)
+
+        notes_text = (
+            "• Integer from 1 to 2048\n"
+            "• BIP-39 English wordlist entry\n"
+            "• Exactly 11 binary digits (e.g. 11001011100)"
+        )
+        ttk.Label(
+            notes_frame,
+            text=notes_text,
+            justify="left",
+            font=("Consolas", 9)
+        ).pack(anchor="w")
+
+        # Live entry counter
+        self.count_label = ttk.Label(self, text="Entries: 0 / 12")
+        self.count_label.pack(anchor="w", padx=10, pady=(4, 2))
+
+        self.input_text = scrolledtext.ScrolledText(
+            self,
+            height=6,
+            wrap=tk.WORD,
+            font=("Consolas", 11),
+            bg=text_bg,
+            fg=fg_color,
+            insertbackground=fg_color,
+            selectbackground=select_bg
+        )
+        self.input_text.pack(fill="both", expand=False, padx=10, pady=4)
+
+        # Real-time bindings
+        self.input_text.bind("<<Modified>>", self._on_text_modified)
+        self.input_text.bind("<KeyRelease>", self.update_count)
+        self.input_text.bind("<<Paste>>", lambda e: self.after(10, self.update_count))
+        self.input_text.bind("<ButtonRelease-1>", self.update_count)
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill="x", padx=10, pady=6)
+
+        ttk.Button(btn_frame, text="Roll Number", command=self.roll_dice).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Roll Bits", command=self.roll_bits).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Find Valid Last Words", command=self.find_last).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Validate Full Phrase", command=self.validate).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Clear", command=self.clear).pack(side="left", padx=4)
+
+        ttk.Label(self, text="Results:").pack(anchor="w", padx=10)
+
+        self.output = scrolledtext.ScrolledText(
+            self,
+            height=16,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            bg=text_bg,
+            fg=fg_color,
+            insertbackground=fg_color,
+            selectbackground=select_bg
+        )
+        self.output.pack(fill="both", expand=True, padx=10, pady=4)
+
+        self.status = ttk.Label(self, text="Ready", relief="sunken", font=("Consolas", 9))
+        self.status.pack(fill="x", side="bottom")
+
+        # Initial count
+        self.update_count()
+
+    def _on_text_modified(self, event=None):
+        self.input_text.edit_modified(False)
+        self.update_count()
+
+    def update_count(self, event=None):
+        total = self.mode.get()                 # 12 or 24
+        needed_partial = total - 1              # 11 or 23
+        raw = self.input_text.get("1.0", tk.END).strip()
+
+        if not raw:
+            self.count_label.config(
+                text=f"Entries: 0 / {total}",
+                foreground="#e0e0e0"
+            )
+            return
+
+        try:
+            indices = parse_entries(raw)
+            count = len(indices)
+
+            if count == needed_partial:
+                self.count_label.config(
+                    text=f"Entries: {count} / {total}  →  Ready for last word",
+                    foreground="#4caf50"   # green
+                )
+            elif count == total:
+                self.count_label.config(
+                    text=f"Entries: {count} / {total}  →  Full phrase",
+                    foreground="#4caf50"   # green
+                )
+            elif count > total:
+                self.count_label.config(
+                    text=f"Entries: {count} / {total}  (too many)",
+                    foreground="#ff9800"   # orange
+                )
+            else:
+                self.count_label.config(
+                    text=f"Entries: {count} / {total}",
+                    foreground="#e0e0e0"   # neutral
+                )
+
+        except Exception:
+            # Stop counting at the first invalid token
+            tokens = raw.replace(",", " ").replace("\n", " ").replace("\t", " ").split()
+            valid = 0
+            for token in tokens:
+                token = token.strip().lower()
+                if not token:
+                    continue
+                try:
+                    # Same order as parse_entries
+                    if len(token) == 11 and all(c in "01" for c in token):
+                        pass  # valid 11-bit binary
+                    elif token.isdigit():
+                        num = int(token)
+                        if not (1 <= num <= 2048):
+                            break
+                    else:
+                        if token not in WORD_TO_INDEX:
+                            break
+                    valid += 1
+                except Exception:
+                    break
+
+            self.count_label.config(
+                text=f"Entries: {valid} / {total}  (invalid token)",
+                foreground="#f44336"   # red
+            )
+
+    def _append_word(self, word):
+        current = self.input_text.get("1.0", tk.END).rstrip()
+        if current:
+            self.input_text.insert(tk.END, f" {word}")
+        else:
+            self.input_text.insert(tk.END, word)
+        self.update_count()
+
+    def roll_dice(self):
+        try:
+            raw = self.input_text.get("1.0", tk.END).strip()
+            indices = parse_entries(raw) if raw else []
+            total = self.mode.get()
+            needed = total - 1
+
+            if len(indices) == needed:
+                valid_last = find_valid_last_indices(indices, total)
+                idx = random.choice(valid_last)
+                num = idx + 1
+                word = WORDLIST[idx]
+                self.status.config(text=f"Valid last word rolled: {num} → {word}")
+            else:
+                num = random.randint(1, 2048)
+                word = WORDLIST[num - 1]
+                self.status.config(text=f"Rolled {num} → {word}")
+        except Exception:
+            num = random.randint(1, 2048)
+            word = WORDLIST[num - 1]
+            self.status.config(text=f"Rolled {num} → {word}")
+
+        self._append_word(word)
+
+    def roll_bits(self):
+        try:
+            raw = self.input_text.get("1.0", tk.END).strip()
+            indices = parse_entries(raw) if raw else []
+            total = self.mode.get()
+            needed = total - 1
+
+            if len(indices) == needed:
+                valid_last = find_valid_last_indices(indices, total)
+                idx = random.choice(valid_last)
+                bits = f"{idx:011b}"
+                num = idx + 1
+                word = WORDLIST[idx]
+                self.status.config(text=f"Valid bits: {bits}  →  {num}  →  {word}")
+            else:
+                bits = "".join(random.choice("01") for _ in range(11))
+                idx = int(bits, 2)
+                num = idx + 1
+                word = WORDLIST[idx]
+                self.status.config(text=f"Bits: {bits}  →  {num}  →  {word}")
+
+        except Exception:
+            bits = "".join(random.choice("01") for _ in range(11))
+            idx = int(bits, 2)
+            num = idx + 1
+            word = WORDLIST[idx]
+            self.status.config(text=f"Bits: {bits}  →  {num}  →  {word}")
+
+        self._append_word(word)
+
+    def find_last(self):
+        try:
+            indices = parse_entries(self.input_text.get("1.0", tk.END))
+            total = self.mode.get()
+            needed = total - 1
+            if len(indices) != needed:
+                raise ValueError("Wrong number of entries")
+            last_indices = find_valid_last_indices(indices, total)
+
+            self.output.delete("1.0", tk.END)
+            self.output.insert(tk.END, f"Valid last words ({len(last_indices)} options):\n")
+            self.output.insert(tk.END, "-" * 45 + "\n")
+            for i, idx in enumerate(last_indices, 1):
+                self.output.insert(tk.END, f"{i:2d}.  {idx+1:4d}  {WORDLIST[idx]}\n")
+            self.status.config(text="Done")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def validate(self):
+        try:
+            indices = parse_entries(self.input_text.get("1.0", tk.END))
+            total = self.mode.get()
+            if len(indices) != total:
+                raise ValueError("Wrong number of entries")
+            valid = is_valid_full(indices, total)
+
+            self.output.delete("1.0", tk.END)
+            if valid:
+                self.output.insert(tk.END, "VALID SEED PHRASE\n")
+                self.output.insert(tk.END, "=" * 45 + "\n\n")
+                for i, idx in enumerate(indices, 1):
+                    self.output.insert(tk.END, f"{i:2d}.  {idx+1:4d}  {WORDLIST[idx]}\n")
+                self.status.config(text="Checksum OK")
+            else:
+                self.output.insert(tk.END, "INVALID checksum\n")
+                self.status.config(text="Failed")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def clear(self):
+        self.input_text.delete("1.0", tk.END)
+        self.output.delete("1.0", tk.END)
+        self.status.config(text="Cleared")
+        self.update_count()
+
+if __name__ == "__main__":
+    chosen_theme = ask_theme()
+    app = App(theme=chosen_theme)
+    app.mainloop()
